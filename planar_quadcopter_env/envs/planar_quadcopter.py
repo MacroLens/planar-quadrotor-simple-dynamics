@@ -3,6 +3,7 @@ from gymnasium import spaces
 import pygame
 import numpy as np
 from math import remainder
+from scipy.integrate import solve_ivp
 
 
 class PlanarQuadCopterEnv(gym.Env):
@@ -103,24 +104,27 @@ class PlanarQuadCopterEnv(gym.Env):
         self._action = np.clip(action, self.action_space.low, self.action_space.high)/self.action_space.high
         # print(f"{self._action=}")
         u1,u2 = action
-        _, _, theta, vx, vy, vtheta = self._agent_state
-        # ddx = -self.beta*((u1) + (u2))*np.sin(theta)/self.MASS
-        # ddy = self.beta*((u1) + (u2))*np.cos(theta)/self.MASS - self.GRAVITY
-        # ddz = self.CENTER_TO_PROP/self.INERTIA*self.beta/2*((u1) - (u2))
 
         control_u1 = np.tanh(self.alpha*u1) if self._options["saturate_controls"] else u1
         control_u2 = np.tanh(self.alpha*u2) if self._options["saturate_controls"] else u2
+        def gradient(state):
+            _, _, theta, vx, vy, vtheta = state
+            ddx = -self.beta*(control_u1 + control_u2)*np.sin(theta)/self.MASS
+            ddy = self.beta*(control_u1 + control_u2)*np.cos(theta)/self.MASS - self.GRAVITY
+            ddz = self.CENTER_TO_PROP/self.INERTIA*self.beta*(control_u1 - control_u2)
 
-        ddx = -self.beta*(control_u1 + control_u2)*np.sin(theta)/self.MASS
-        ddy = self.beta*(control_u1 + control_u2)*np.cos(theta)/self.MASS - self.GRAVITY
-        ddz = self.CENTER_TO_PROP/self.INERTIA*self.beta*(control_u1 - control_u2)
-        
+            return np.array([vx,vy,vtheta, ddx,ddy,ddz])
 
+        # print(gradient(self._agent_state))
 
-        euler_step = self.dt*(np.array([vx,vy,vtheta,ddx,ddy,ddz]))
+        new_state = solve_ivp(
+            lambda _,y: gradient(y),
+            t_span=[0.0, self.dt],
+            y0 = self._agent_state,
+            t_eval=[self.dt]
+        ).y.flatten()
+        # print(gradient(new_state))
 
-        # Define f = x_k + Delta t * dot(x_k)
-        new_state = self._agent_state + euler_step
         new_state[2] = remainder(new_state[2], 2*np.pi) # Keep angle [-pi,pi]
         # We use `np.clip` to make sure we don't leave the grid
         self._agent_state = np.clip(
