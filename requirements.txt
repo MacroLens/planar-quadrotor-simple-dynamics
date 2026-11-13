@@ -1,0 +1,10 @@
+numpy
+matplotlib
+ipykernel
+ipympl
+scipy
+sympy
+gymnasium[classic-control]
+gymnasium[other]
+supersuit
+pettingzoo
