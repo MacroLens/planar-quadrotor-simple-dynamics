@@ -9,19 +9,20 @@ class PlanarQuadCopterEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     dt = 0.1
-    MASS = 0.486     # kg
-    INERTIA = 0.00383    # kg·m^2
+    MASS = 1     # kg   Dylan's = 0.486
+    INERTIA = 0.25    # kg·m^2  Dylan's = 0.00383
     CENTER_TO_PROP = 0.25     # m
-    GRAVITY = 9.81     # m/s^2
+    GRAVITY = 9.8     # m/s^2   Dylan's = 9.81
     # alpha= 1/5 * np.arctanh(1/2)
-    alpha= 1
-    beta = GRAVITY
+    alpha = 1
+    beta = 1 # Dylan's GRAVITY
 
 
-    def __init__(self, box_size=10, render_mode="rgb_array"):
+    def __init__(self, box_size=10, render_mode="rgb_array", noisy=False):
         self.size = None  # The size of the square grid
         self.HEIGHT_WIDTH=box_size
         self.window_size = 512  # The size of the PyGame window
+        self.noisy = noisy
 
         # Observation is [x,y,theta, vx, vy, vtheta]
         # Max positional velocities is freefall from top to bottom:
@@ -32,10 +33,11 @@ class PlanarQuadCopterEnv(gym.Env):
             high=np.array([self.HEIGHT_WIDTH/2,self.HEIGHT_WIDTH/2,np.pi,50,50,2*65]),
             dtype=np.float64
         )
-        # Action space of two controls
-        self.action_space: spaces.Box = spaces.Box(low=np.array([-self.beta/2,-self.beta/2]),
-                                       high=np.array([self.beta/2,self.beta/2]),
-                                       dtype=np.float64)
+        # Action space of two controls, uses thrust and torque
+        # Action space for thrust and torque
+        self.action_space: spaces.Box = spaces.Box(low=np.array([-self.beta/2,-2*self.INERTIA]),
+                                               high=np.array([self.beta/2,2*self.INERTIA]),
+                                               dtype=np.float64)
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -108,13 +110,14 @@ class PlanarQuadCopterEnv(gym.Env):
         # ddy = self.beta*((u1) + (u2))*np.cos(theta)/self.MASS - self.GRAVITY
         # ddz = self.CENTER_TO_PROP/self.INERTIA*self.beta/2*((u1) - (u2))
 
+        # TODO: check if correct for paper
         control_u1 = np.tanh(self.alpha*u1) if self._options["saturate_controls"] else u1
         control_u2 = np.tanh(self.alpha*u2) if self._options["saturate_controls"] else u2
 
-        ddx = -self.beta*(control_u1 + control_u2)*np.sin(theta)/self.MASS
-        ddy = self.beta*(control_u1 + control_u2)*np.cos(theta)/self.MASS - self.GRAVITY
-        ddz = self.CENTER_TO_PROP/self.INERTIA*self.beta*(control_u1 - control_u2)
-        
+        noise = np.clip(np.random.normal(0, 1, (3,)), -3, 3) if self.noisy else np.zeros((3,))
+        ddx = -self.beta*(self.MASS*self.GRAVITY + control_u1)*np.sin(theta)/self.MASS + noise[0]
+        ddy = self.beta*(self.MASS*self.GRAVITY + control_u1)*np.cos(theta)/self.MASS - self.GRAVITY + noise[1]
+        ddz = self.beta*control_u2/self.INERTIA + noise[2]        
 
 
         euler_step = self.dt*(np.array([vx,vy,vtheta,ddx,ddy,ddz]))
@@ -186,7 +189,11 @@ class PlanarQuadCopterEnv(gym.Env):
             (0, 0, 0),
             pygame.Rect(body_width/2 - body_height/2, body_width - body_height, body_height, body_height)
         )
-        # Draw arrows indicating control strength
+
+        # Draw arrows indicating control strength TODO: fix direction to map torque on visual
+        arrow_len = self._action[0]*body_width
+        clockwise = arrow_len if self._action[1] < 0 else 0
+        countercl = arrow_len if self._action[1] > 0 else 0
         pygame.draw.line(
             body_surf,
             (255,0,0),
@@ -198,7 +205,7 @@ class PlanarQuadCopterEnv(gym.Env):
             body_surf,
             (255,0,0),
             (body_width - body_height/2, body_height/2 + body_width),
-            (body_width - body_height/2, body_height/2 + body_width + self._action[1]*body_width),
+            (body_width - body_height/2, body_height/2 + body_width + self._action[0]*body_width),
             int(body_height)
         )
 
