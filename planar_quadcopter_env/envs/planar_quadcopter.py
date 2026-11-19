@@ -3,6 +3,7 @@ from gymnasium import spaces
 import pygame
 import numpy as np
 from math import remainder
+import warnings
 
 
 class PlanarQuadCopterEnv(gym.Env):
@@ -11,14 +12,23 @@ class PlanarQuadCopterEnv(gym.Env):
     dt = 0.1
     MASS = 1     # kg   Dylan's = 0.486
     INERTIA = 0.25    # kg·m^2  Dylan's = 0.00383
-    CENTER_TO_PROP = 0.25     # m
+    CENTER_TO_PROP = 0.1     # m   Dylan's = 0.25
     GRAVITY = 9.8     # m/s^2   Dylan's = 9.81
     # alpha= 1/5 * np.arctanh(1/2)
     alpha = 1
     beta = 1 # Dylan's GRAVITY
 
 
-    def __init__(self, box_size=10, render_mode="rgb_array", noisy=False):
+    def __init__(self, box_size=25, render_mode="rgb_array", noisy=False, num_obs=5, obs_low=1, 
+                 obs_high=3, goal_rad=6, goal_excl=15, obstacles=None, goal=None): # changed default box from 10 to 25
+        # box_size: environment size of box_size x box_size
+        # noisy: whether Gaussian noise is added to dynamics
+        # num_obs: number of obstacles (to be uniformly sampled from state space), default is 5
+        # obs_low: lower bound on obstacle radius, default is 1
+        # obs_high: upper bound on bostacle radius, default is 3
+        # goal_rad: radius for the goal region, default is 6
+        # goal_excl: minimum distance that initial state must be from goal center, default is 15
+        
         self.size = None  # The size of the square grid
         self.HEIGHT_WIDTH=box_size
         self.window_size = 512  # The size of the PyGame window
@@ -41,6 +51,62 @@ class PlanarQuadCopterEnv(gym.Env):
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
+
+        # Obstacles
+        self.obstacles = []
+        if obstacles is None:
+            for _ in range(num_obs):
+                center = self.observation_space.sample()[:2] # only need x and y, first two indices
+                radius = np.random.uniform(obs_low, obs_high)
+                self.obstacles.append((center, radius))
+        else:
+            if not isinstance(obstacles, (tuple, list)):
+                raise TypeError("Set of obstacle must be a tuple or list containing tuple or lists of obstacles' centers and radii.")
+            if len(obstacles) == 0:
+                warnings.warn("No obstacles given.")
+            else:
+                if not isinstance(obstacles[0], (tuple, list)):
+                    raise ValueError("Set of obstacle must be a tuple or list containing tuple or lists of obstacles' centers and radii.")
+            for o in obstacles:
+                if not isinstance(o, (tuple, list)):
+                    raise TypeError("Obstacle must be a tuple or list containing center and radius.")
+                if len(o) != 2:
+                    raise ValueError("Obstacle must be a tuple or list containing center and radius.")
+                if not isinstance(o[0], (tuple, list, np.ndarray)) or len(o[0]) != 2:
+                    raise ValueError("Obstacle center must be a tuple, list, or array containing the x, y coordinates of the center.")
+                if not isinstance(o[1], (int, float, np.number)):
+                    raise ValueError("Obstacle radius must be a single numeric value.")
+                self.obstacles.append(o)
+
+        # Goal
+        if goal is None:
+            center = None
+            attempts = 0
+            while center is None:
+                candidate = self.observation_space.sample()[:2]
+                in_obs = any([np.linalg.norm(candidate - c) <= r for c, r in self.obstacles])
+                if not in_obs:
+                    center = candidate
+                attempts += 1
+                if attempts == 1e3:
+                    warnings.warn("Attempt to find valid goal region is taking a while, you may wish to check input parameters.")
+            self.goal = (center, goal_rad)
+        else:
+            if not isinstance(goal, (tuple, list)):
+                raise TypeError("Goal must be a tuple or list containing center and radius.")
+            if len(goal) != 2:
+                raise ValueError("Goal must be a tuple or list containing center and radius.")
+            if not isinstance(goal[0], (tuple, list, np.ndarray)) or len(goal[0]) != 2:
+                raise ValueError("Goal center must be a tuple, list, or array containing the x, y coordinates of the center.")
+            if not isinstance(goal[1], (int, float, np.number)):
+                raise ValueError("Goal radius must be a single numeric value.")
+            if any([np.linalg.norm(goal[0] - c) <= r for c, r in self.obstacles]):
+                raise ValueError("Goal center may not lie within an obstacle.")
+            self.goal = goal
+        print(self.goal)
+
+        # Exclusion radius for initial points
+        self.goal_exclusion = goal_excl
 
         """
         If human-rendering is used, `self.window` will be a reference
@@ -84,11 +150,34 @@ class PlanarQuadCopterEnv(gym.Env):
             if "saturate_controls" in options:
                 assert isinstance(options["saturate_controls"], bool)
                 default_options["saturate_controls"] = options["saturate_controls"]
+            if "initial_state" in options:
+                assert options["initial_state"].shape == self.observation_space.shape
+                if any(options["initial_state"] < self.observation_space.low) or any(options["initial_state"] > self.observation_space.high):
+                    raise ValueError("Initial state is out of bounds.")
+                default_options["initial_state"] = options["initial_state"]
         
         options = default_options
 
-        # Choose the agent's location uniformly at random
-        self._agent_state = self.np_random.uniform(options["low"],options["high"])
+        # Choose the agent's location uniformly at random            
+        if "initial_state" in options:
+            self._agent_state = options["initial_state"]
+        else:
+            attempts = 0
+            while True:
+                # Sample random point in space
+                pt = self.np_random.uniform(options["low"],options["high"])
+                # Check if it falls in any of the obstacle regions
+                in_obs = [np.linalg.norm(pt[:2] - c) <= r for c, r in self.obstacles]
+                # Check if it falls in the goal exclusion zone
+                in_goal_excl = np.linalg.norm(pt[:2] - self.goal[0]) <= self.goal_exclusion
+                # If neither is true, return point
+                if not any(in_obs) and not in_goal_excl:
+                    self._agent_state = pt
+                    break
+                attempts += 1
+                if attempts == 1e3:
+                    warnings.warn("Attempt to find valid initial point is taking a while, you may wish to check input parameters.")
+            # self._agent_state = self.np_random.uniform(options["low"],options["high"])
         self._action = np.array([0,0])
         self._options = options
 
@@ -129,15 +218,24 @@ class PlanarQuadCopterEnv(gym.Env):
         self._agent_state = np.clip(
             new_state, self.observation_space.low, self.observation_space.high
         )
-        # An episode is done iff the agent has reached the target
-        terminated = np.any(
+
+        # An episode is done iff the agent has reached the boundary or obstacles
+        reach_boundary = np.any(
             (self._agent_state[:2] == self.observation_space.low[:2]) |
             (self._agent_state[:2] == self.observation_space.high[:2])
         )
+        reach_obs = any([np.linalg.norm(self._agent_state[:2] - c) <= r for c, r in self.obstacles])
+        reach_goal = np.linalg.norm(self._agent_state[:2] - self.goal[0]) <= self.goal[1]
+        # truncated is set by a wrapper which I can't access from in here so termination 
+        # only occurs for boundary or obstacle hitting, have to check truncation and reward
+        # to see if we end in goal state or fail
+        terminated = reach_boundary or reach_obs or reach_goal
 
         # terminated = False
         # reward = 1 if terminated else 0  # Binary sparse rewards
-        reward = 1 if not terminated else -500
+        # reward = 1 if not terminated else -500
+        # reward of 1 when in goal region, reward of 0 in free space, reward of -200 in boundary or obstacle        reach_goal = np.linalg.norm(self._agent_state[:2] - self.goal[0]) <= self.goal[1]
+        reward = 1 if reach_goal else -200 if (reach_boundary or reach_obs) else 0
         observation = self._get_obs()
         info = self._get_info()
 
@@ -165,6 +263,25 @@ class PlanarQuadCopterEnv(gym.Env):
         # )  # The size of a single grid square in pixels
 
         pix_per_meter = self.window_size / self.HEIGHT_WIDTH
+
+        # Draw goal region
+        x,y = self.goal[0]
+        pygame.draw.circle(
+            canvas,
+            (144, 238, 144),
+            pix_per_meter * (np.array([x,-y]) + self.HEIGHT_WIDTH/2),
+            self.goal[1]*pix_per_meter
+        )
+
+        # Draw obstacles
+        for c, r in self.obstacles:
+            x,y = c
+            pygame.draw.circle(
+                canvas,
+                (255, 127, 127),
+                pix_per_meter * (np.array([x,-y]) + self.HEIGHT_WIDTH/2),
+                r*pix_per_meter
+            )
 
         # Convert from -50,50 to 0,100 coordinates
         x,y = self._agent_state[:2]
@@ -237,3 +354,21 @@ class PlanarQuadCopterEnv(gym.Env):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
+
+    def obstacles(self): return self.obstacles
+
+    def goal(self): return self.goal
+
+    def goal_exclusion(self): return self.goal_exclusion
+
+    def in_obstacle(self, pt):
+        """
+        Returns if the given point lies within an obstacle
+        """
+        return any([np.linalg.norm(pt[:2] - c) <= r for c, r in self.obstacles])
+
+    def in_goal(self, pt):
+        """
+        Returns if the given point lies within the goal region
+        """
+        return np.linalg.norm(pt[:2] - self.goal[0]) <= self.goal[1]
