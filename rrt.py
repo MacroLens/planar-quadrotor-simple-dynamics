@@ -8,6 +8,7 @@ from collections import Counter
 import numpy as np
 from scipy.optimize import lsq_linear
 from planar_quadcopter_env.envs.planar_quadcopter import PlanarQuadCopterEnv
+from tqdm import tqdm
 
 N_STEPS = 3     # steps per extension
 def wrap(a):
@@ -116,7 +117,7 @@ class RRT:
     SAMPLE_HIGH_REST = np.array([np.pi / 4, 2.0, 2.0, 1.0])
     RHO_SCALE = (1.0, 1.0, 1.0, 1.0)     # extra multipliers on (w_p, w_theta, w_v, w_omega)
 
-    def __init__(self, env, x_init, is_free, is_goal, max_iter=75000, seed=None):
+    def __init__(self, env, x_init, is_free, is_goal, max_iter=75000, options=None, seed=None):
         """
         env: planar_quadcopter env, is modified to be not noisy.
         is_free:  state -> True if not in an obstacle and not in the goal.
@@ -126,10 +127,11 @@ class RRT:
         self.env: PlanarQuadCopterEnv = env.unwrapped
         # assert self.env.beta == 1, "steer assumes the paper's dynamics (env.beta == 1)"
         x_init = np.asarray(x_init, float)
-        self.env.noisy = False
-        self.env.reset(options={"low": x_init, "high": x_init, "saturate_controls": False})
+        # self.env.noisy = False
+        self.env.reset(options={"low": x_init, "high": x_init, "saturate_controls": False, "initial_state": x_init})
 
         self.is_free, self.is_goal, self.max_iter = is_free, is_goal, max_iter
+        assert self.allowed(x_init), f"x_init {x_init} is in an obstacle"
         self.rng = np.random.default_rng(seed)
         obs = self.env.observation_space
         self.sample_low = np.concatenate([obs.low[:2], self.SAMPLE_LOW_REST])
@@ -180,7 +182,8 @@ class RRT:
         U = steer(self.env, x_near.state, x_rand, self.w)
         S, terminated = rollout(self.env, x_near.state, U)
         for j, s in enumerate(S):
-            if self.is_goal(s) and not terminated[j]:
+            # The env also sets terminated in the goal, so check the goal first.
+            if self.is_goal(s):
                 return U[: j + 1], S[: j + 1]
             if terminated[j] or not self.is_free(s):
                 return None
@@ -211,7 +214,7 @@ class RRT:
         if self.is_goal(self.head.state):
             self.goal_nodes.append(self.head)
             return self.goal_paths()
-        for _ in range(self.max_iter):
+        for _ in tqdm(range(self.max_iter), desc="RRT iterations", unit="iter", ncols=80,leave=False):
             x_rand = self.random_state()
             self.samples.append(x_rand)
             self.extend(x_rand)
