@@ -20,7 +20,7 @@ class PlanarQuadCopterEnv(gym.Env):
 
 
     def __init__(self, box_size=25, render_mode="rgb_array", noisy=False, num_obs=5, obs_low=1, 
-                 obs_high=3, goal_rad=6, goal_excl=15, obstacles=None, goal=None): # changed default box from 10 to 25
+                 obs_high=3, goal_rad=6, goal_excl=15, obstacles=None, goal=None, collision=True): # changed default box from 10 to 25
         # box_size: environment size of box_size x box_size
         # noisy: whether Gaussian noise is added to dynamics
         # num_obs: number of obstacles (to be uniformly sampled from state space), default is 5
@@ -33,6 +33,7 @@ class PlanarQuadCopterEnv(gym.Env):
         self.HEIGHT_WIDTH=box_size
         self.window_size = 512  # The size of the PyGame window
         self.noisy = noisy
+        self.collision = collision
 
         # Observation is [x,y,theta, vx, vy, vtheta]
         # Max positional velocities is freefall from top to bottom:
@@ -103,7 +104,6 @@ class PlanarQuadCopterEnv(gym.Env):
             if any([np.linalg.norm(goal[0] - c) <= r for c, r in self.obstacles]):
                 raise ValueError("Goal center may not lie within an obstacle.")
             self.goal = goal
-        print(self.goal)
 
         # Exclusion radius for initial points
         self.goal_exclusion = goal_excl
@@ -119,7 +119,7 @@ class PlanarQuadCopterEnv(gym.Env):
         self.clock = None
 
     def _get_obs(self):
-        return self._agent_state
+        return self._agent_state.copy()  # callers must not share the internal state
 
     def _get_info(self):
         return {
@@ -160,7 +160,7 @@ class PlanarQuadCopterEnv(gym.Env):
 
         # Choose the agent's location uniformly at random            
         if "initial_state" in options:
-            self._agent_state = options["initial_state"]
+            self._agent_state = np.array(options["initial_state"], dtype=np.float64)  # copy: step() may modify the state in place
         else:
             attempts = 0
             while True:
@@ -203,7 +203,7 @@ class PlanarQuadCopterEnv(gym.Env):
         control_u1 = np.tanh(self.alpha*u1) if self._options["saturate_controls"] else u1
         control_u2 = np.tanh(self.alpha*u2) if self._options["saturate_controls"] else u2
 
-        noise = np.clip(np.random.normal(0, 1, (3,)), -3, 3) if self.noisy else np.zeros((3,))
+        noise = np.clip(np.random.normal(0, 1, (3,)), -3, 3) if self.noisy else np.zeros((3,))/200
         ddx = -self.beta*(self.MASS*self.GRAVITY + control_u1)*np.sin(theta)/self.MASS + noise[0]
         ddy = self.beta*(self.MASS*self.GRAVITY + control_u1)*np.cos(theta)/self.MASS - self.GRAVITY + noise[1]
         ddz = self.beta*control_u2/self.INERTIA + noise[2]        
@@ -215,9 +215,17 @@ class PlanarQuadCopterEnv(gym.Env):
         new_state = self._agent_state + euler_step
         new_state[2] = remainder(new_state[2], 2*np.pi) # Keep angle [-pi,pi]
         # We use `np.clip` to make sure we don't leave the grid
-        self._agent_state = np.clip(
-            new_state, self.observation_space.low, self.observation_space.high
-        )
+        if self.collision:
+            self._agent_state = np.clip(
+                new_state, self.observation_space.low, self.observation_space.high
+            )
+        else:
+            clipped_state = np.clip(
+                new_state, self.observation_space.low, self.observation_space.high
+            )
+            # Allow for the quadrotor to leave the box, but clip the other states.
+            self._agent_state[:2] = new_state[:2]
+            self._agent_state[2:] = clipped_state[2:]
 
         # An episode is done iff the agent has reached the boundary or obstacles
         reach_boundary = np.any(
@@ -229,7 +237,7 @@ class PlanarQuadCopterEnv(gym.Env):
         # truncated is set by a wrapper which I can't access from in here so termination 
         # only occurs for boundary or obstacle hitting, have to check truncation and reward
         # to see if we end in goal state or fail
-        terminated = reach_boundary or reach_obs or reach_goal
+        terminated = self.collision and (reach_boundary or reach_obs or reach_goal)
 
         # terminated = False
         # reward = 1 if terminated else 0  # Binary sparse rewards
@@ -354,6 +362,8 @@ class PlanarQuadCopterEnv(gym.Env):
         if self.window is not None:
             pygame.display.quit()
             pygame.quit()
+            self.window = None
+            self.clock = None
 
     def obstacles(self): return self.obstacles
 
